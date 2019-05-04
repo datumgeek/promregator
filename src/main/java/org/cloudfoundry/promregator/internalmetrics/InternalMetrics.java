@@ -19,6 +19,7 @@ public class InternalMetrics {
 	private Counter autoRefreshingCacheMapExpiry;
 	private Counter autoRefreshingCacheMapRefreshSuccess;
 	private Counter autoRefreshingCacheMapRefreshFailure;
+	private Counter autoRefreshingCacheMapErroneousItemDisplaced;
 	private Gauge autoRefreshingCacheMapLastScan;
 	
 	private Counter connectionWatchdogReconnects;
@@ -41,6 +42,8 @@ public class InternalMetrics {
 		this.autoRefreshingCacheMapRefreshSuccess = Counter.build("promregator_autorefreshingcachemap_refresh_success", "The number of successful refreshes of objact so far in an AutoRefreshingCacheMap")
 				.labelNames("cache_map_name").register();
 		this.autoRefreshingCacheMapRefreshFailure = Counter.build("promregator_autorefreshingcachemap_refresh_failure", "The number of failed refreshes of objact so far in an AutoRefreshingCacheMap")
+				.labelNames("cache_map_name").register();
+		this.autoRefreshingCacheMapErroneousItemDisplaced = Counter.build("promregator_autorefreshingcachemap_erroneous_item_displaced", "The number of items forced to be displaced by an AutoRefreshingCacheMap due to erroneous results")
 				.labelNames("cache_map_name").register();
 		
 		this.autoRefreshingCacheMapLastScan = Gauge.build("promregator_autorefreshingcachemap_scantimestamp", "The timestamp of the last execution of the RefreshThread execution of an AutoRefreshingCacheMap")
@@ -84,6 +87,13 @@ public class InternalMetrics {
 			return;
 		
 		this.autoRefreshingCacheMapRefreshFailure.labels(cacheMapName).inc();
+	}
+	
+	public void countAutoRefreshingCacheMapErroneousItemDisplaced(String cacheMapName) {
+		if (!this.enabled)
+			return;
+		
+		this.autoRefreshingCacheMapErroneousItemDisplaced.labels(cacheMapName).inc();
 	}
 	
 	public void setTimestampAutoRefreshingCacheMapRefreshScan(String cacheMapName) {

@@ -2,17 +2,23 @@ package org.cloudfoundry.promregator.cache;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
 import org.apache.commons.collections4.map.AbstractMapDecorator;
 import org.apache.log4j.Logger;
 import org.apache.log4j.MDC;
 import org.cloudfoundry.promregator.internalmetrics.InternalMetrics;
+
+import reactor.core.Exceptions;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 public class AutoRefreshingCacheMap<K, V> extends AbstractMapDecorator<K, V> {
 
@@ -218,12 +224,24 @@ public class AutoRefreshingCacheMap<K, V> extends AbstractMapDecorator<K, V> {
 		public void run() {
 			MDC.put("AutoRefreshingCacheMap", this.map.getName());
 			log.debug(String.format("Starting checks for this AutoRefreshingCacheMap; expiry: %dms, refresh: %dms", this.map.expiryDuration.toMillis(), this.map.refreshInterval.toMillis()));
+			
+			int roundtripCounter = 0;
 			while (this.shouldRun) {
+				roundtripCounter++;
 				try {
 					this.refreshMap();
 				} catch (Exception e) {
 					log.warn(String.format("Unexpected exception was raised in Refresher Thread for AutoRefreshingCacheMap"), e);
 					// fall-through is expected!
+				}
+				
+				if (roundtripCounter % 20 == 0) {
+					/*
+					 * Don't do displacement checking too often; it just costs CPU cycles, but
+					 * we don't need such a high resolution for it.
+					 */
+					roundtripCounter = 0;
+					this.displaceErroneousMonos();
 				}
 				
 				try {
@@ -259,7 +277,7 @@ public class AutoRefreshingCacheMap<K, V> extends AbstractMapDecorator<K, V> {
 					}
 				}
 			}
-
+			
 			// delete what is expired
 			for (K key : deleteList) {
 				if (this.map.internalMetrics != null) {
@@ -283,6 +301,42 @@ public class AutoRefreshingCacheMap<K, V> extends AbstractMapDecorator<K, V> {
 					if (this.map.internalMetrics != null) {
 						this.map.internalMetrics.countAutoRefreshingCacheMapRefreshFailure(this.map.getName());
 					}
+				}
+			}
+		}
+
+		/** 
+		 * Issue #96: Check Mono values, whether they are erroneous. Displace them, if they are.
+		 * 
+		 * Note that we can do this, because all our Monos which we are using, use the .cache() operator!
+		 */
+		private void displaceErroneousMonos() {
+			/*
+			 * Note that we don't synchronize this here; we behave just like any other consumer outside
+			 * would do, too.
+			 */
+			for (Entry<K, V> entry : this.map.entrySet()) {
+				final V value = entry.getValue();
+				if (!(value instanceof Mono<?>)) {
+					// ... then we can't check, if the value is erroneous.
+					continue;
+				}
+				
+				final K key = entry.getKey();
+				if (value instanceof Mono<?>) {
+					Mono<?> m = (Mono<?>) value;
+					
+					m.doOnError(e -> {
+						if (e instanceof TimeoutException) {
+							log.warn(String.format("Erroneously timed-out Mono with key %s was detected in AutoRefreshingCacheMap %s; displacing the item immediately.", key, this.map.getName()), e);
+							// self-destruction
+							this.map.remove(key);
+							if (this.map.internalMetrics != null) {
+								this.map.internalMetrics.countAutoRefreshingCacheMapErroneousItemDisplaced(this.map.getName());
+							}
+						}
+					}).subscribe();
+
 				}
 			}
 		}
